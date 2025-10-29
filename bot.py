@@ -17,7 +17,7 @@ Required AI services:
 
 Run the bot using::
 
-    python bot.py --port 8001
+    python bot.py
 """
 
 import os
@@ -132,7 +132,6 @@ async def run_bot(transport: BaseTransport):
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
             logger.info("Client connected")
-            # Kick off the conversation
             messages.append({"role": "system", "content": "Say hello and briefly introduce yourself."})
             await task.queue_frames([LLMRunFrame()])
 
@@ -171,14 +170,32 @@ async def bot(runner_args: RunnerArguments):
 
 
 if __name__ == "__main__":
-    # Import main from pipecat runner and run it
-    # The runner will automatically handle CORS and server setup
+    # Render deployment configuration
+    # Render sets PORT env var (default 10000) and requires binding to 0.0.0.0
+    port = int(os.getenv("PORT", 10000))
+    host = os.getenv("HOST", "0.0.0.0")
+    
+    logger.info(f"Configuring for Render deployment: host={host}, port={port}")
+    
+    # Configure command line arguments for Pipecat runner
+    # Remove any existing port/host arguments to avoid conflicts
+    args_to_remove = []
+    for i, arg in enumerate(sys.argv):
+        if arg in ["--port", "-p", "--host", "-h"]:
+            args_to_remove.extend([i, i + 1])
+        elif arg.startswith("--port=") or arg.startswith("--host="):
+            args_to_remove.append(i)
+    
+    # Remove in reverse order to maintain indices
+    for i in sorted(args_to_remove, reverse=True):
+        if i < len(sys.argv):
+            sys.argv.pop(i)
+    
+    # Add Render-specific configuration
+    sys.argv.extend(["--host", host, "--port", str(port)])
+    
+    logger.info(f"Starting Pipecat with args: {sys.argv[1:]}")
+    
+    # Run Pipecat
     from pipecat.runner.run import main
-    port = os.getenv("PORT", 8001)
-    
-    # Set default port to 8001 if not provided in command line
-    if "--port" not in sys.argv and "-p" not in sys.argv:
-        sys.argv.extend(["--port", port])
-    
-    logger.info(f"Starting Pipecat with arguments: {sys.argv}")
     main()
