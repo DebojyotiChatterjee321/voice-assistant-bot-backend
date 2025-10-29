@@ -193,61 +193,12 @@ async def bot(runner_args: RunnerArguments):
 
     await run_bot(transport)
 
-def run_health_server(port):
-    """Separate process for health checks"""
-    allowed_origins_env = os.getenv("CORS_ALLOW_ORIGINS", "*")
-    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
-    allow_methods = os.getenv("CORS_ALLOW_METHODS", "GET,POST,OPTIONS")
-    allow_headers = os.getenv("CORS_ALLOW_HEADERS", "Authorization,Content-Type")
-    allow_credentials = os.getenv("CORS_ALLOW_CREDENTIALS", "false").lower() == "true"
-    max_age = os.getenv("CORS_MAX_AGE", "600")
-
-    @web.middleware
-    async def cors_middleware(request, handler):
-        if request.method == "OPTIONS":
-            response = web.Response(status=204)
-        else:
-            response = await handler(request)
-
-        origin = request.headers.get("Origin")
-        allow_origin = None
-        if "*" in allowed_origins:
-            allow_origin = "*"
-        elif origin and origin in allowed_origins:
-            allow_origin = origin
-
-        if allow_origin:
-            response.headers["Access-Control-Allow-Origin"] = allow_origin
-            if allow_origin != "*":
-                response.headers["Vary"] = "Origin"
-
-        response.headers["Access-Control-Allow-Methods"] = allow_methods
-        response.headers["Access-Control-Allow-Headers"] = allow_headers
-        response.headers["Access-Control-Max-Age"] = max_age
-
-        if allow_credentials and allow_origin and allow_origin != "*":
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-
-        return response
-
-    async def health(request):
-        return web.Response(text='{"status":"healthy"}')
-
-    app = web.Application(middlewares=[cors_middleware])
-    app.router.add_get('/', health)
-    app.router.add_get('/health', health)
-    
-    print(f"Health server starting on 0.0.0.0:{port}")
-    web.run_app(app, host="0.0.0.0", port=port, print=None)
-
 if __name__ == "__main__":
-    # Start health server in separate process
-    port = int(os.getenv("PORT", 8080))
-    health_process = Process(target=run_health_server, args=(port,))
-    health_process.start()
-    
-    print("Health server started, now starting Pipecat...")
-    
-    # Run Pipecat
     from pipecat.runner.run import main
+
+    # Respect PORT env override while keeping runner defaults otherwise
+    port = int(os.getenv("PORT", 7860))
+    os.environ["RUNNER_PORT"] = str(port)
+
+    logger.info("Launching Pipecat runner on 0.0.0.0:%d", port)
     main()
