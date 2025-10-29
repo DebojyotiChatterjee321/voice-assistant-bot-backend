@@ -27,6 +27,8 @@ from pathlib import Path
 from aiohttp import ClientSession
 from dotenv import load_dotenv
 from loguru import logger
+from threading import Thread
+from aiohttp import web
 
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -190,9 +192,27 @@ async def bot(runner_args: RunnerArguments):
 
     await run_bot(transport)
 
+def start_health_server():
+    async def health(request):
+        return web.Response(text='OK')
+    
+    app = web.Application()
+    app.router.add_get('/health', health)
+    
+    port = int(os.getenv("PORT", 8080))
+    print(f"Starting health server on 0.0.0.0:{port}")
+    web.run_app(app, host="0.0.0.0", port=port, print=None)
+
 
 if __name__ == "__main__":
+
+    health_thread = Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+
+    # Give health server time to start
+    import time
+    time.sleep(2)
+
+    # Run Pipecat
     from pipecat.runner.run import main
-    port = int(os.getenv("PORT", 7860))
-    print(port)
     main()
