@@ -1,0 +1,32 @@
+[
+  {
+    "customer_id": "CUST001",
+    "name": "Sarah Johnson",
+    "email": "sarah.j@email.com",
+    "phone": "+1-555-0101"
+  },
+  {
+    "customer_id": "CUST002",
+    "name": "Michael Chen",
+    "email": "m.chen@email.com",
+    "phone": "+1-555-0102"
+  },
+  {
+    "customer_id": "CUST003",
+    "name": "Emily Rodriguez",
+    "email": "emily.r@email.com",
+    "phone": "+1-555-0103"
+  },
+  {
+    "customer_id": "CUST004",
+    "name": "David Kim",
+    "email": "david.kim@email.com",
+    "phone": "+1-555-0104"
+  },
+  {
+    "customer_id": "CUST005",
+    "name": "Jessica Martinez",
+    "email": "jessica.m@email.com",
+    "phone": "+1-555-0105"
+  }
+]

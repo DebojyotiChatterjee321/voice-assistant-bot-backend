@@ -1,0 +1,82 @@
+[
+  {
+    "product_id": "PROD001",
+    "name": "Sony WH-1000XM5 Wireless Noise-Cancelling Headphones",
+    "description": "Industry-leading noise cancellation with premium sound quality. 30-hour battery life, multipoint connection, and touch controls.",
+    "price": 399.99,
+    "category": "Electronics",
+    "use_case": "Perfect for travel, work-from-home, music listening, and calls. Ideal for commuters and audiophiles.",
+    "application": "Compatible with all Bluetooth devices including smartphones, tablets, laptops, and gaming consoles.",
+    "stock_quantity": 45,
+    "product_metadata": {
+      "brand": "Sony",
+      "color": "Black",
+      "weight": "250g",
+      "warranty": "1 year"
+    }
+  },
+  {
+    "product_id": "PROD002",
+    "name": "Apple MacBook Air M2 13-inch Laptop",
+    "description": "Supercharged by M2 chip. 13.6-inch Liquid Retina display, 8GB RAM, 256GB SSD. Incredibly thin and light design.",
+    "price": 1199.0,
+    "category": "Computers",
+    "use_case": "Perfect for students, professionals, content creators, and everyday computing. Excellent for coding, design work, and multitasking.",
+    "application": "Runs macOS Ventura. Compatible with all Apple ecosystem devices. Supports multiple monitors.",
+    "stock_quantity": 28,
+    "product_metadata": {
+      "brand": "Apple",
+      "color": "Space Gray",
+      "weight": "1.24kg",
+      "warranty": "1 year AppleCare"
+    }
+  },
+  {
+    "product_id": "PROD003",
+    "name": "Samsung 55-inch 4K QLED Smart TV",
+    "description": "Quantum Dot technology delivers vibrant colors. 4K resolution with HDR support. Built-in streaming apps and voice control.",
+    "price": 899.99,
+    "category": "Electronics",
+    "use_case": "Home entertainment, gaming, streaming movies and shows. Great for sports viewing and family movie nights.",
+    "application": "Smart TV with built-in WiFi, HDMI ports, USB connectivity. Compatible with Alexa and Google Assistant.",
+    "stock_quantity": 15,
+    "product_metadata": {
+      "brand": "Samsung",
+      "screen_size": "55 inches",
+      "resolution": "4K UHD",
+      "warranty": "2 years"
+    }
+  },
+  {
+    "product_id": "PROD004",
+    "name": "Ninja Air Fryer Pro 5.5 Quart",
+    "description": "Cook healthier meals with 75% less fat. 5.5-quart capacity, 400\u00b0F max heat. 8 preset cooking functions.",
+    "price": 129.99,
+    "category": "Kitchen Appliances",
+    "use_case": "Healthy cooking, quick meals, batch cooking. Perfect for families, meal prep, and air frying, roasting, baking.",
+    "application": "Easy to use with digital controls. Dishwasher-safe basket. Includes recipe book with 20+ recipes.",
+    "stock_quantity": 67,
+    "product_metadata": {
+      "brand": "Ninja",
+      "capacity": "5.5 quarts",
+      "power": "1500W",
+      "warranty": "1 year"
+    }
+  },
+  {
+    "product_id": "PROD005",
+    "name": "Fitbit Charge 6 Fitness Tracker",
+    "description": "Advanced health and fitness tracking. Heart rate monitor, sleep tracking, GPS, and 40+ exercise modes. 7-day battery life.",
+    "price": 179.99,
+    "category": "Wearables",
+    "use_case": "Fitness tracking, health monitoring, workout optimization. Great for runners, gym enthusiasts, and health-conscious users.",
+    "application": "Syncs with smartphones (iOS and Android). Water-resistant up to 50m. Compatible with Fitbit Premium app.",
+    "stock_quantity": 92,
+    "product_metadata": {
+      "brand": "Fitbit",
+      "color": "Black",
+      "battery": "7 days",
+      "warranty": "1 year"
+    }
+  }
+]

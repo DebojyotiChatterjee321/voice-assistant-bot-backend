@@ -1,0 +1,52 @@
+[
+  {
+    "order_id": "ORD12345",
+    "customer_id": "CUST001",
+    "product_id": "PROD001",
+    "quantity": 1,
+    "total_amount": 399.99,
+    "status": "out_for_delivery",
+    "shipping_address": "123 Main St, New York, NY 10001",
+    "estimated_delivery": "2025-10-23 04:31:28.439123"
+  },
+  {
+    "order_id": "ORD12346",
+    "customer_id": "CUST002",
+    "product_id": "PROD002",
+    "quantity": 1,
+    "total_amount": 1199.0,
+    "status": "shipped",
+    "shipping_address": "456 Oak Ave, Los Angeles, CA 90001",
+    "estimated_delivery": "2025-10-25 04:31:28.439123"
+  },
+  {
+    "order_id": "ORD12347",
+    "customer_id": "CUST003",
+    "product_id": "PROD004",
+    "quantity": 2,
+    "total_amount": 259.98,
+    "status": "delivered",
+    "shipping_address": "789 Pine Rd, Chicago, IL 60601",
+    "estimated_delivery": "2025-10-20 04:31:28.439123"
+  },
+  {
+    "order_id": "ORD12348",
+    "customer_id": "CUST004",
+    "product_id": "PROD005",
+    "quantity": 1,
+    "total_amount": 179.99,
+    "status": "confirmed",
+    "shipping_address": "321 Elm St, Houston, TX 77001",
+    "estimated_delivery": "2025-10-27 04:31:28.439123"
+  },
+  {
+    "order_id": "ORD12349",
+    "customer_id": "CUST005",
+    "product_id": "PROD003",
+    "quantity": 1,
+    "total_amount": 899.99,
+    "status": "pending",
+    "shipping_address": "654 Maple Dr, Phoenix, AZ 85001",
+    "estimated_delivery": "2025-10-29 04:31:28.439123"
+  }
+]
