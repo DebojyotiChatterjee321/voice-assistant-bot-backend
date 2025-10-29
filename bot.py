@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from threading import Thread
 from aiohttp import web
+import aiohttp_cors
 from multiprocessing import Process
 
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
@@ -233,12 +234,23 @@ def run_health_server(port):
     async def health(request):
         return web.Response(text='{"status":"healthy"}')
 
-    app = web.Application(middlewares=[cors_middleware])
-    app.router.add_get('/', health)
-    app.router.add_get('/health', health)
-    
-    print(f"Health server starting on 0.0.0.0:{port}")
-    web.run_app(app, host="0.0.0.0", port=port, print=None)
+    app = web.Application()
+
+    # Configure CORS
+    cors = aiohttp_cors.setup(app, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods="*"
+        )
+    })
+
+    async def health(request):
+        return web.Response(text='OK')
+
+    route = app.router.add_get('/health', health)
+    cors.add(route)  # Add CORS to route
 
 if __name__ == "__main__":
     # Start health server in separate process
