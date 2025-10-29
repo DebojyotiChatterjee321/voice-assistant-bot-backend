@@ -17,16 +17,20 @@ Required AI services:
 
 Run the bot using::
 
-    python bot.py --port 8001
+    uv run bot.py
 """
 
+
 import os
-import sys
 from pathlib import Path
 
 from aiohttp import ClientSession
 from dotenv import load_dotenv
 from loguru import logger
+from threading import Thread
+from aiohttp import web
+import aiohttp_cors
+from multiprocessing import Process
 
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -52,6 +56,8 @@ from db_tools import DatabaseTools
 load_dotenv(override=True)
 
 
+
+
 async def run_bot(transport: BaseTransport):
     """Main bot logic."""
     logger.info("Starting bot")
@@ -63,17 +69,20 @@ async def run_bot(transport: BaseTransport):
             aiohttp_session=session
         )
 
+
         # Text-to-Speech service
         tts = ElevenLabsTTSService(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
             voice_id=os.getenv("ELEVENLABS_VOICE_ID")
         )
 
+
         # LLM service
         llm = GoogleLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),
             model=os.getenv("GOOGLE_MODEL")
         )
+
 
         messages = [
             {
@@ -109,14 +118,26 @@ async def run_bot(transport: BaseTransport):
         # Pipeline - assembled from reusable components
         pipeline = Pipeline([
             transport.input(),
+
             rtvi,
+
             stt,
+
+
             context_aggregator.user(),
+
             llm,
+
             tts,
+
             transport.output(),
+
+
+
             context_aggregator.assistant(),
+
         ])
+
 
         task = PipelineTask(
             pipeline,
@@ -141,7 +162,11 @@ async def run_bot(transport: BaseTransport):
             logger.info("Client disconnected")
             await task.cancel()
 
+
+
+
         runner = PipelineRunner(handle_sigint=False)
+
         await runner.run(task)
 
 
@@ -169,16 +194,72 @@ async def bot(runner_args: RunnerArguments):
 
     await run_bot(transport)
 
+def run_health_server(port):
+    """Separate process for health checks"""
+    allowed_origins_env = os.getenv("CORS_ALLOW_ORIGINS", "*")
+    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+    allow_methods = os.getenv("CORS_ALLOW_METHODS", "GET,POST,OPTIONS")
+    allow_headers = os.getenv("CORS_ALLOW_HEADERS", "Authorization,Content-Type")
+    allow_credentials = os.getenv("CORS_ALLOW_CREDENTIALS", "false").lower() == "true"
+    max_age = os.getenv("CORS_MAX_AGE", "600")
+
+    @web.middleware
+    async def cors_middleware(request, handler):
+        if request.method == "OPTIONS":
+            response = web.Response(status=204)
+        else:
+            response = await handler(request)
+
+        origin = request.headers.get("Origin")
+        allow_origin = None
+        if "*" in allowed_origins:
+            allow_origin = "*"
+        elif origin and origin in allowed_origins:
+            allow_origin = origin
+
+        if allow_origin:
+            response.headers["Access-Control-Allow-Origin"] = allow_origin
+            if allow_origin != "*":
+                response.headers["Vary"] = "Origin"
+
+        response.headers["Access-Control-Allow-Methods"] = allow_methods
+        response.headers["Access-Control-Allow-Headers"] = allow_headers
+        response.headers["Access-Control-Max-Age"] = max_age
+
+        if allow_credentials and allow_origin and allow_origin != "*":
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+
+        return response
+
+    async def health(request):
+        return web.Response(text='{"status":"healthy"}')
+
+    app = web.Application()
+
+    # Configure CORS
+    cors = aiohttp_cors.setup(app, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+            allow_methods="*"
+        )
+    })
+
+    async def health(request):
+        return web.Response(text='OK')
+
+    route = app.router.add_get('/health', health)
+    cors.add(route)  # Add CORS to route
 
 if __name__ == "__main__":
-    # Import main from pipecat runner and run it
-    # The runner will automatically handle CORS and server setup
+    # Start health server in separate process
+    port = int(os.getenv("PORT", 8080))
+    health_process = Process(target=run_health_server, args=(port,))
+    health_process.start()
+    
+    print("Health server started, now starting Pipecat...")
+    
+    # Run Pipecat
     from pipecat.runner.run import main
-    port = os.getenv("PORT", 8001)
-    
-    # Set default port to 8001 if not provided in command line
-    if "--port" not in sys.argv and "-p" not in sys.argv:
-        sys.argv.extend(["--port", port])
-    
-    logger.info(f"Starting Pipecat with arguments: {sys.argv}")
     main()
