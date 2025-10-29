@@ -194,4 +194,5 @@ async def bot(runner_args: RunnerArguments):
 if __name__ == "__main__":
     from pipecat.runner.run import main
     port = int(os.getenv("PORT", 7860))
-    main(port=port)
+    print(port)
+    main()
