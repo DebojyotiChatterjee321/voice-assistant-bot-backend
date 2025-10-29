@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from threading import Thread
 from aiohttp import web
+from multiprocessing import Process
 
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -192,27 +193,26 @@ async def bot(runner_args: RunnerArguments):
 
     await run_bot(transport)
 
-def start_health_server():
+def run_health_server(port):
+    """Separate process for health checks"""
     async def health(request):
-        return web.Response(text='OK')
+        return web.Response(text='{"status":"healthy"}')
     
     app = web.Application()
+    app.router.add_get('/', health)
     app.router.add_get('/health', health)
     
-    port = int(os.getenv("PORT", 8080))
-    print(f"Starting health server on 0.0.0.0:{port}")
+    print(f"Health server starting on 0.0.0.0:{port}")
     web.run_app(app, host="0.0.0.0", port=port, print=None)
 
-
 if __name__ == "__main__":
-
-    health_thread = Thread(target=start_health_server, daemon=True)
-    health_thread.start()
-
-    # Give health server time to start
-    import time
-    time.sleep(2)
-
+    # Start health server in separate process
+    port = int(os.getenv("PORT", 8080))
+    health_process = Process(target=run_health_server, args=(port,))
+    health_process.start()
+    
+    print("Health server started, now starting Pipecat...")
+    
     # Run Pipecat
     from pipecat.runner.run import main
     main()
