@@ -1,63 +1,3 @@
-@dataclass
-class TurnTiming:
-    stt_ms: float = 0.0
-    dialogue_ms: float = 0.0
-    tts_ms: float = 0.0
-
-
-class TimingObserver(FrameProcessor):
-    """Collect per-turn timing for STT, scripted dialogue, and TTS."""
-
-    def __init__(self) -> None:
-        super().__init__(name="TimingObserver", enable_direct_mode=True)
-        self._stt_start: Optional[float] = None
-        self._dialogue_start: Optional[float] = None
-        self._tts_start: Optional[float] = None
-        self._turn_id = 0
-        self._timings: Dict[int, TurnTiming] = {}
-
-    def _current(self) -> TurnTiming:
-        timing = self._timings.setdefault(self._turn_id, TurnTiming())
-        return timing
-
-    async def process_frame(self, frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-
-        if isinstance(frame, StartFrame):
-            await self.push_frame(frame, direction)
-            return
-
-        if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
-            self._turn_id += 1
-            self._stt_start = frame.metadata.get("stt_start")
-            stt_end = frame.metadata.get("stt_end")
-            if self._stt_start and stt_end:
-                self._current().stt_ms = (stt_end - self._stt_start) * 1000
-            self._dialogue_start = time.perf_counter()
-            self._current()
-        elif isinstance(frame, LLMFullResponseStartFrame):
-            if self._dialogue_start:
-                self._current().dialogue_ms = (time.perf_counter() - self._dialogue_start) * 1000
-            self._dialogue_start = None
-            self._tts_start = time.perf_counter()
-        elif isinstance(frame, LLMFullResponseEndFrame):
-            if self._tts_start:
-                self._current().tts_ms += (time.perf_counter() - self._tts_start) * 1000
-            self._tts_start = None
-            timing = self._timings.get(self._turn_id)
-            if timing:
-                logger.info(
-                    "Turn %s timings — STT: %.1f ms | Fixed Dialogue: %.1f ms | TTS: %.1f ms",
-                    self._turn_id,
-                    timing.stt_ms,
-                    timing.dialogue_ms,
-                    timing.tts_ms,
-                )
-        elif frame.__class__.__name__ == "TTSAudioRawFrame":
-            if not self._tts_start:
-                self._tts_start = time.perf_counter()
-
-        await self.push_frame(frame, direction)
 #
 # Copyright (c) 2024–2025, Daily
 #
@@ -85,7 +25,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, Optional
 
@@ -117,14 +57,81 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
+class CustomElevenLabsSTTService(ElevenLabsSTTService):
+    async def run_stt(self, frame):
+        start = time.perf_counter()
+        async for result in super().run_stt(frame):
+            processing_time = time.perf_counter() - start
+            result.metadata["processing_time"] = processing_time
+            yield result
+
 load_dotenv(override=True)
+
+@dataclass
+class TurnTiming:
+    stt_ms: float = 0.0
+    dialogue_ms: float = 0.0
+    tts_ms: float = 0.0
+
+
+class TimingObserver(FrameProcessor):
+    """Collect per-turn timing for STT, scripted dialogue, and TTS."""
+
+    def __init__(self) -> None:
+        super().__init__(name="TimingObserver", enable_direct_mode=True)
+        self._stt_start: Optional[float] = None
+        self._dialogue_start: Optional[float] = None
+        self._tts_start: Optional[float] = None
+        self._turn_id = 0
+        self._timings: Dict[int, TurnTiming] = {}
+        self._current_text = ""
+
+    def _current(self) -> TurnTiming:
+        timing = self._timings.setdefault(self._turn_id, TurnTiming())
+        return timing
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, StartFrame):
+            await self.push_frame(frame, direction)
+            return
+
+        if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
+            self._turn_id += 1
+            processing_time = frame.metadata.get("processing_time")
+            if processing_time:
+                self._current().stt_ms = processing_time * 1000
+            self._dialogue_start = time.perf_counter()
+            self._current()
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            if self._dialogue_start:
+                self._current().dialogue_ms = (time.perf_counter() - self._dialogue_start) * 1000
+            self._dialogue_start = None
+            self._tts_start = time.perf_counter()
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            if self._tts_start:
+                self._current().tts_ms += (time.perf_counter() - self._tts_start) * 1000
+            self._tts_start = None
+            timing = self._timings.get(self._turn_id)
+            if timing:
+                total_ms = timing.stt_ms + timing.dialogue_ms + timing.tts_ms
+                logger.info(
+                    f"Turn {self._turn_id}: '{self._current_text}' — STT: {timing.stt_ms:.1f} ms | Dialogue: {timing.dialogue_ms:.1f} ms | TTS: {timing.tts_ms:.1f} ms | Total: {total_ms:.1f} ms"
+                )
+        elif isinstance(frame, LLMTextFrame):
+            self._current_text = frame.text or ""
+
+        await self.push_frame(frame, direction)
 
 
 class DialogueState(Enum):
     """State machine for the scripted conversation."""
 
     INIT = auto()
+    AWAITING_NAME = auto()
     AWAITING_ORDER_REQUEST = auto()
+    AWAITING_ORDER_ID = auto()
     AWAITING_THANK_YOU = auto()
     COMPLETE = auto()
 
@@ -138,15 +145,19 @@ def _normalize(text: str) -> str:
 class ScriptedDialogueProcessor(FrameProcessor):
     """Frame processor that enforces a deterministic conversation."""
 
-    GREETING = "Hello, how can I help you today?"
+    GREETING = "Hello, please tell me your name."
+    ASSIST_PROMPT_TEMPLATE = "Hi there {username}, how can I assist you today?"
+    ORDER_ID_PROMPT = "Please provide me your order id."
     ORDER_RESPONSE = "Your order is shipped yesterday and will be delivered tomorrow"
-    ORDER_EXPECTED = _normalize("I need details on my order")
+    ORDER_REQUEST_EXPECTED = _normalize("I need details on my order")
     THANK_YOU_EXPECTED = _normalize("Thank you")
 
     def __init__(self) -> None:
         super().__init__(name="ScriptedDialogueProcessor", enable_direct_mode=True)
         self._state = DialogueState.INIT
         self._ready_event: asyncio.Event = asyncio.Event()
+        self._user_name: str | None = None
+        self._order_id: str | None = None
 
     async def begin_dialogue(self) -> None:
         """Emit the scripted greeting once the pipeline is ready."""
@@ -158,7 +169,7 @@ class ScriptedDialogueProcessor(FrameProcessor):
 
         logger.info("Scripted dialogue: sending greeting")
         await self._emit_assistant(self.GREETING)
-        self._state = DialogueState.AWAITING_ORDER_REQUEST
+        self._state = DialogueState.AWAITING_NAME
 
     async def process_frame(self, frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -188,19 +199,43 @@ class ScriptedDialogueProcessor(FrameProcessor):
         normalized = _normalize(text)
         logger.debug(f"Scripted dialogue received transcription: '{text}'")
 
-        if self._state == DialogueState.AWAITING_ORDER_REQUEST:
-            if normalized == self.ORDER_EXPECTED:
+        if self._state == DialogueState.AWAITING_NAME:
+            if text:
+                self._user_name = text
+                logger.info("Scripted dialogue: captured user name '%s'", text)
+                await self._emit_assistant(
+                    self.ASSIST_PROMPT_TEMPLATE.format(username=text)
+                )
+                self._state = DialogueState.AWAITING_ORDER_REQUEST
+            else:
+                logger.warning(
+                    "Received empty response while awaiting user name"
+                )
+                await self._emit_assistant("I didn't catch your name. Could you please repeat it?")
+        elif self._state == DialogueState.AWAITING_ORDER_REQUEST:
+            if normalized == self.ORDER_REQUEST_EXPECTED:
                 logger.info("Scripted dialogue: received expected order request")
-                await self._emit_assistant(self.ORDER_RESPONSE)
-                self._state = DialogueState.AWAITING_THANK_YOU
+                await self._emit_assistant(self.ORDER_ID_PROMPT)
+                self._state = DialogueState.AWAITING_ORDER_ID
             else:
                 logger.warning(
                     "Unexpected user utterance while awaiting order request: '%s'",
                     text,
                 )
                 await self._emit_assistant(
-                    "Please say 'I need details on my order."
+                    "Please say 'I need details on my order.'"
                 )
+        elif self._state == DialogueState.AWAITING_ORDER_ID:
+            if text:
+                self._order_id = text
+                logger.info("Scripted dialogue: captured order id '%s'", text)
+                await self._emit_assistant(self.ORDER_RESPONSE)
+                self._state = DialogueState.AWAITING_THANK_YOU
+            else:
+                logger.warning(
+                    "Received empty response while awaiting order id"
+                )
+                await self._emit_assistant("Please provide me your order id.")
         elif self._state == DialogueState.AWAITING_THANK_YOU:
             if normalized == self.THANK_YOU_EXPECTED:
                 logger.info("Scripted dialogue: conversation complete, awaiting disconnect")
@@ -228,7 +263,7 @@ async def run_bot(transport: BaseTransport):
 
     async with ClientSession() as session:
         # Speech-to-Text service
-        stt = ElevenLabsSTTService(
+        stt = CustomElevenLabsSTTService(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
             aiohttp_session=session
         )
