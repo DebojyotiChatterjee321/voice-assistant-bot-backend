@@ -41,6 +41,7 @@ from pipecat.frames.frames import (
     EndFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMRunFrame,
     LLMTextFrame,
     StartFrame,
     TranscriptionFrame,
@@ -48,11 +49,14 @@ from pipecat.frames.frames import (
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
 from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
@@ -125,138 +129,6 @@ class TimingObserver(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
-class DialogueState(Enum):
-    """State machine for the scripted conversation."""
-
-    INIT = auto()
-    AWAITING_NAME = auto()
-    AWAITING_ORDER_REQUEST = auto()
-    AWAITING_ORDER_ID = auto()
-    AWAITING_THANK_YOU = auto()
-    COMPLETE = auto()
-
-
-def _normalize(text: str) -> str:
-    """Lowercase and strip punctuation for robust matching."""
-
-    return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
-
-
-class ScriptedDialogueProcessor(FrameProcessor):
-    """Frame processor that enforces a deterministic conversation."""
-
-    GREETING = "Hello, please tell me your name."
-    ASSIST_PROMPT_TEMPLATE = "Hi there {username}, how can I assist you today?"
-    ORDER_ID_PROMPT = "Please provide me your order id."
-    ORDER_RESPONSE = "Your order is shipped yesterday and will be delivered tomorrow"
-    ORDER_REQUEST_EXPECTED = _normalize("I need details on my order")
-    THANK_YOU_EXPECTED = _normalize("Thank you")
-
-    def __init__(self) -> None:
-        super().__init__(name="ScriptedDialogueProcessor", enable_direct_mode=True)
-        self._state = DialogueState.INIT
-        self._ready_event: asyncio.Event = asyncio.Event()
-        self._user_name: str | None = None
-        self._order_id: str | None = None
-
-    async def begin_dialogue(self) -> None:
-        """Emit the scripted greeting once the pipeline is ready."""
-
-        await self._ready_event.wait()
-        if self._state != DialogueState.INIT:
-            logger.debug("Scripted dialogue already started; skipping greeting.")
-            return
-
-        logger.info("Scripted dialogue: sending greeting")
-        await self._emit_assistant(self.GREETING)
-        self._state = DialogueState.AWAITING_NAME
-
-    async def process_frame(self, frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-
-        if isinstance(frame, StartFrame):
-            await self.push_frame(frame, direction)
-            self._ready_event.set()
-            return
-
-        if isinstance(frame, (EndFrame, CancelFrame)):
-            await self.push_frame(frame, direction)
-            self._ready_event.clear()
-            return
-
-        if isinstance(frame, TranscriptionFrame):
-            await self._handle_transcription(frame)
-            await self.push_frame(frame, direction)
-            return
-
-        await self.push_frame(frame, direction)
-
-    async def _handle_transcription(self, frame: TranscriptionFrame) -> None:
-        text = (frame.text or "").strip()
-        if not text:
-            return
-
-        normalized = _normalize(text)
-        logger.debug(f"Scripted dialogue received transcription: '{text}'")
-
-        if self._state == DialogueState.AWAITING_NAME:
-            if text:
-                self._user_name = text
-                logger.info("Scripted dialogue: captured user name '%s'", text)
-                await self._emit_assistant(
-                    self.ASSIST_PROMPT_TEMPLATE.format(username=text)
-                )
-                self._state = DialogueState.AWAITING_ORDER_REQUEST
-            else:
-                logger.warning(
-                    "Received empty response while awaiting user name"
-                )
-                await self._emit_assistant("I didn't catch your name. Could you please repeat it?")
-        elif self._state == DialogueState.AWAITING_ORDER_REQUEST:
-            if normalized == self.ORDER_REQUEST_EXPECTED:
-                logger.info("Scripted dialogue: received expected order request")
-                await self._emit_assistant(self.ORDER_ID_PROMPT)
-                self._state = DialogueState.AWAITING_ORDER_ID
-            else:
-                logger.warning(
-                    "Unexpected user utterance while awaiting order request: '%s'",
-                    text,
-                )
-                await self._emit_assistant(
-                    "Please say 'I need details on my order.'"
-                )
-        elif self._state == DialogueState.AWAITING_ORDER_ID:
-            if text:
-                self._order_id = text
-                logger.info("Scripted dialogue: captured order id '%s'", text)
-                await self._emit_assistant(self.ORDER_RESPONSE)
-                self._state = DialogueState.AWAITING_THANK_YOU
-            else:
-                logger.warning(
-                    "Received empty response while awaiting order id"
-                )
-                await self._emit_assistant("Please provide me your order id.")
-        elif self._state == DialogueState.AWAITING_THANK_YOU:
-            if normalized == self.THANK_YOU_EXPECTED:
-                logger.info("Scripted dialogue: conversation complete, awaiting disconnect")
-                self._state = DialogueState.COMPLETE
-            else:
-                logger.warning(
-                    "Unexpected user utterance while awaiting thank you: '%s'",
-                    text,
-                )
-                await self._emit_assistant(
-                    "Please respond with 'Thank you' to end the session."
-                )
-        else:
-            logger.debug("Scripted dialogue ignoring transcription in state %s", self._state)
-
-    async def _emit_assistant(self, text: str) -> None:
-        await self.push_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
-        await self.push_frame(LLMTextFrame(text=text), FrameDirection.DOWNSTREAM)
-        await self.push_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
-
-
 async def run_bot(transport: BaseTransport):
     """Main bot logic."""
     logger.info("Starting bot")
@@ -274,8 +146,24 @@ async def run_bot(transport: BaseTransport):
             voice_id=os.getenv("ELEVENLABS_VOICE_ID")
         )
 
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful voice assistant. Respond naturally and conversationally to user queries.",
+            }
+        ]
+
+        context = LLMContext(messages)
+        context_aggregator = LLMContextAggregatorPair(context)
+
+        # LLM service
+        llm = GoogleLLMService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash-latest"),
+            system_instruction="You are a helpful voice assistant. Respond naturally and conversationally to user queries."
+        )
+
         rtvi = RTVIProcessor()
-        dialogue = ScriptedDialogueProcessor()
         timing_observer = TimingObserver()
 
         # Pipeline - assembled from reusable components
@@ -283,9 +171,11 @@ async def run_bot(transport: BaseTransport):
             transport.input(),
             rtvi,
             stt,
-            dialogue,
+            context_aggregator.user(),
+            llm,
             tts,
             transport.output(),
+            context_aggregator.assistant(),
             timing_observer,
         ])
 
@@ -303,7 +193,7 @@ async def run_bot(transport: BaseTransport):
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
             logger.info("Client connected")
-            await dialogue.begin_dialogue()
+            await task.queue_frames([LLMRunFrame()])
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client):
