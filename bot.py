@@ -1,3 +1,63 @@
+@dataclass
+class TurnTiming:
+    stt_ms: float = 0.0
+    dialogue_ms: float = 0.0
+    tts_ms: float = 0.0
+
+
+class TimingObserver(FrameProcessor):
+    """Collect per-turn timing for STT, scripted dialogue, and TTS."""
+
+    def __init__(self) -> None:
+        super().__init__(name="TimingObserver", enable_direct_mode=True)
+        self._stt_start: Optional[float] = None
+        self._dialogue_start: Optional[float] = None
+        self._tts_start: Optional[float] = None
+        self._turn_id = 0
+        self._timings: Dict[int, TurnTiming] = {}
+
+    def _current(self) -> TurnTiming:
+        timing = self._timings.setdefault(self._turn_id, TurnTiming())
+        return timing
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, StartFrame):
+            await self.push_frame(frame, direction)
+            return
+
+        if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.DOWNSTREAM:
+            self._turn_id += 1
+            self._stt_start = frame.metadata.get("stt_start")
+            stt_end = frame.metadata.get("stt_end")
+            if self._stt_start and stt_end:
+                self._current().stt_ms = (stt_end - self._stt_start) * 1000
+            self._dialogue_start = time.perf_counter()
+            self._current()
+        elif isinstance(frame, LLMFullResponseStartFrame):
+            if self._dialogue_start:
+                self._current().dialogue_ms = (time.perf_counter() - self._dialogue_start) * 1000
+            self._dialogue_start = None
+            self._tts_start = time.perf_counter()
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            if self._tts_start:
+                self._current().tts_ms += (time.perf_counter() - self._tts_start) * 1000
+            self._tts_start = None
+            timing = self._timings.get(self._turn_id)
+            if timing:
+                logger.info(
+                    "Turn %s timings — STT: %.1f ms | Fixed Dialogue: %.1f ms | TTS: %.1f ms",
+                    self._turn_id,
+                    timing.stt_ms,
+                    timing.dialogue_ms,
+                    timing.tts_ms,
+                )
+        elif frame.__class__.__name__ == "TTSAudioRawFrame":
+            if not self._tts_start:
+                self._tts_start = time.perf_counter()
+
+        await self.push_frame(frame, direction)
 #
 # Copyright (c) 2024–2025, Daily
 #
@@ -20,9 +80,14 @@ Run the bot using::
     python bot.py
 """
 
+import asyncio
 import os
+import re
 import sys
-from pathlib import Path
+import time
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Dict, Optional
 
 from aiohttp import ClientSession
 from dotenv import load_dotenv
@@ -31,25 +96,130 @@ from loguru import logger
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import (
+    CancelFrame,
+    EndFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMTextFrame,
+    StartFrame,
+    TranscriptionFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.adapters.schemas.tools_schema import ToolsSchema
-from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
 from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
-from db_tools import DatabaseTools
-
 load_dotenv(override=True)
+
+
+class DialogueState(Enum):
+    """State machine for the scripted conversation."""
+
+    INIT = auto()
+    AWAITING_ORDER_REQUEST = auto()
+    AWAITING_THANK_YOU = auto()
+    COMPLETE = auto()
+
+
+def _normalize(text: str) -> str:
+    """Lowercase and strip punctuation for robust matching."""
+
+    return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
+
+
+class ScriptedDialogueProcessor(FrameProcessor):
+    """Frame processor that enforces a deterministic conversation."""
+
+    GREETING = "Hello, how can I help you today?"
+    ORDER_RESPONSE = "Your order is shipped yesterday and will be delivered tomorrow"
+    ORDER_EXPECTED = _normalize("I need details on my order")
+    THANK_YOU_EXPECTED = _normalize("Thank you")
+
+    def __init__(self) -> None:
+        super().__init__(name="ScriptedDialogueProcessor", enable_direct_mode=True)
+        self._state = DialogueState.INIT
+        self._ready_event: asyncio.Event = asyncio.Event()
+
+    async def begin_dialogue(self) -> None:
+        """Emit the scripted greeting once the pipeline is ready."""
+
+        await self._ready_event.wait()
+        if self._state != DialogueState.INIT:
+            logger.debug("Scripted dialogue already started; skipping greeting.")
+            return
+
+        logger.info("Scripted dialogue: sending greeting")
+        await self._emit_assistant(self.GREETING)
+        self._state = DialogueState.AWAITING_ORDER_REQUEST
+
+    async def process_frame(self, frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, StartFrame):
+            await self.push_frame(frame, direction)
+            self._ready_event.set()
+            return
+
+        if isinstance(frame, (EndFrame, CancelFrame)):
+            await self.push_frame(frame, direction)
+            self._ready_event.clear()
+            return
+
+        if isinstance(frame, TranscriptionFrame):
+            await self._handle_transcription(frame)
+            await self.push_frame(frame, direction)
+            return
+
+        await self.push_frame(frame, direction)
+
+    async def _handle_transcription(self, frame: TranscriptionFrame) -> None:
+        text = (frame.text or "").strip()
+        if not text:
+            return
+
+        normalized = _normalize(text)
+        logger.debug(f"Scripted dialogue received transcription: '{text}'")
+
+        if self._state == DialogueState.AWAITING_ORDER_REQUEST:
+            if normalized == self.ORDER_EXPECTED:
+                logger.info("Scripted dialogue: received expected order request")
+                await self._emit_assistant(self.ORDER_RESPONSE)
+                self._state = DialogueState.AWAITING_THANK_YOU
+            else:
+                logger.warning(
+                    "Unexpected user utterance while awaiting order request: '%s'",
+                    text,
+                )
+                await self._emit_assistant(
+                    "Please say 'I need details on my order."
+                )
+        elif self._state == DialogueState.AWAITING_THANK_YOU:
+            if normalized == self.THANK_YOU_EXPECTED:
+                logger.info("Scripted dialogue: conversation complete, awaiting disconnect")
+                self._state = DialogueState.COMPLETE
+            else:
+                logger.warning(
+                    "Unexpected user utterance while awaiting thank you: '%s'",
+                    text,
+                )
+                await self._emit_assistant(
+                    "Please respond with 'Thank you' to end the session."
+                )
+        else:
+            logger.debug("Scripted dialogue ignoring transcription in state %s", self._state)
+
+    async def _emit_assistant(self, text: str) -> None:
+        await self.push_frame(LLMFullResponseStartFrame(), FrameDirection.DOWNSTREAM)
+        await self.push_frame(LLMTextFrame(text=text), FrameDirection.DOWNSTREAM)
+        await self.push_frame(LLMFullResponseEndFrame(), FrameDirection.DOWNSTREAM)
 
 
 async def run_bot(transport: BaseTransport):
@@ -69,53 +239,19 @@ async def run_bot(transport: BaseTransport):
             voice_id=os.getenv("ELEVENLABS_VOICE_ID")
         )
 
-        # LLM service
-        llm = GoogleLLMService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            model=os.getenv("GOOGLE_MODEL")
-        )
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful e-commerce voice assistant for a retail store. "
-                    "Your first message to the customer should be only - Hello, how can I assist you today?"
-                    "You reply in crisp and concise, but clear and informative."
-                    "Assist customers with product discovery, availability, pricing, order status, returns, and account-related questions."
-                    "Ask for necessary order identifiers before sharing sensitive information. "
-                    "If a request is unrelated to shopping or orders, politely decline and steer the customer back to supported topics."
-                ),
-            },
-        ]
-
-        context = LLMContext(messages)
-        context_aggregator = LLMContextAggregatorPair(context)
-
-        data_dir = Path(__file__).parent / "data"
-        db_path_env = os.getenv("ORDERS_DB_PATH")
-        db_path = Path(db_path_env) if db_path_env else Path(__file__).parent / "orders.db"
-
-        db_tools = DatabaseTools(db_path=db_path, data_dir=data_dir)
-        tool_functions = list(db_tools.tool_functions)
-        for tool in tool_functions:
-            llm.register_direct_function(tool)
-
-        context.set_tools(ToolsSchema(standard_tools=tool_functions))
-        context.set_tool_choice({"type": "auto"})
-
         rtvi = RTVIProcessor()
+        dialogue = ScriptedDialogueProcessor()
+        timing_observer = TimingObserver()
 
         # Pipeline - assembled from reusable components
         pipeline = Pipeline([
             transport.input(),
             rtvi,
             stt,
-            context_aggregator.user(),
-            llm,
+            dialogue,
             tts,
             transport.output(),
-            context_aggregator.assistant(),
+            timing_observer,
         ])
 
         task = PipelineTask(
@@ -132,8 +268,7 @@ async def run_bot(transport: BaseTransport):
         @transport.event_handler("on_client_connected")
         async def on_client_connected(transport, client):
             logger.info("Client connected")
-            messages.append({"role": "system", "content": "Say hello and briefly introduce yourself."})
-            await task.queue_frames([LLMRunFrame()])
+            await dialogue.begin_dialogue()
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport, client):
