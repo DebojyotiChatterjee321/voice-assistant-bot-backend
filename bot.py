@@ -29,7 +29,6 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, Optional
 
-from aiohttp import ClientSession
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -54,20 +53,12 @@ from pipecat.processors.aggregators.llm_response_universal import LLMContextAggr
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
 from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
-from pipecat.services.elevenlabs.stt import ElevenLabsSTTService
+from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-
-class CustomElevenLabsSTTService(ElevenLabsSTTService):
-    async def run_stt(self, frame):
-        start = time.perf_counter()
-        async for result in super().run_stt(frame):
-            processing_time = time.perf_counter() - start
-            result.metadata["processing_time"] = processing_time
-            yield result
 
 load_dotenv(override=True)
 
@@ -133,75 +124,74 @@ async def run_bot(transport: BaseTransport):
     """Main bot logic."""
     logger.info("Starting bot")
 
-    async with ClientSession() as session:
-        # Speech-to-Text service
-        stt = CustomElevenLabsSTTService(
-            api_key=os.getenv("ELEVENLABS_API_KEY"),
-            aiohttp_session=session
-        )
+    # Speech-to-Text service (streaming)
+    stt = DeepgramSTTService(
+        api_key=os.getenv("DEEPGRAM_API_KEY"),
+    )
 
-        # Text-to-Speech service
-        tts = ElevenLabsTTSService(
-            api_key=os.getenv("ELEVENLABS_API_KEY"),
-            voice_id=os.getenv("ELEVENLABS_VOICE_ID")
-        )
+    # Text-to-Speech service
+    tts = ElevenLabsTTSService(
+        api_key=os.getenv("ELEVENLABS_API_KEY2"),
+        voice_id=os.getenv("ELEVENLABS_VOICE_ID"),
+        aggregate_sentences=False,
+    )
 
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a helpful voice assistant. Respond naturally and conversationally to user queries.",
-            }
-        ]
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful voice assistant. Respond naturally and conversationally to user queries.",
+        }
+    ]
 
-        context = LLMContext(messages)
-        context_aggregator = LLMContextAggregatorPair(context)
+    context = LLMContext(messages)
+    context_aggregator = LLMContextAggregatorPair(context)
 
-        # LLM service
-        llm = GoogleLLMService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash-latest"),
-            system_instruction="You are a helpful voice assistant. Respond naturally and conversationally to user queries."
-        )
+    # LLM service
+    llm = GoogleLLMService(
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash-latest"),
+        system_instruction="You are a helpful voice assistant. Respond naturally and conversationally to user queries."
+    )
 
-        rtvi = RTVIProcessor()
-        timing_observer = TimingObserver()
+    rtvi = RTVIProcessor()
+    timing_observer = TimingObserver()
 
-        # Pipeline - assembled from reusable components
-        pipeline = Pipeline([
-            transport.input(),
-            rtvi,
-            stt,
-            context_aggregator.user(),
-            llm,
-            tts,
-            transport.output(),
-            context_aggregator.assistant(),
-            timing_observer,
-        ])
+    # Pipeline - assembled from reusable components
+    pipeline = Pipeline([
+        transport.input(),
+        rtvi,
+        stt,
+        context_aggregator.user(),
+        llm,
+        tts,
+        transport.output(),
+        context_aggregator.assistant(),
+        timing_observer,
+    ])
 
-        task = PipelineTask(
-            pipeline,
-            params=PipelineParams(
-                enable_metrics=True,
-                enable_usage_metrics=True,
-            ),
-            observers=[
-                RTVIObserver(rtvi),
-            ],
-        )
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(
+            enable_metrics=True,
+            enable_usage_metrics=True,
+        ),
+        observers=[
+            RTVIObserver(rtvi),
+        ],
+    )
 
-        @transport.event_handler("on_client_connected")
-        async def on_client_connected(transport, client):
-            logger.info("Client connected")
-            await task.queue_frames([LLMRunFrame()])
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Client connected")
+        await task.queue_frames([LLMRunFrame()])
 
-        @transport.event_handler("on_client_disconnected")
-        async def on_client_disconnected(transport, client):
-            logger.info("Client disconnected")
-            await task.cancel()
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        logger.info("Client disconnected")
+        await task.cancel()
 
-        runner = PipelineRunner(handle_sigint=False)
-        await runner.run(task)
+    runner = PipelineRunner(handle_sigint=False)
+    await runner.run(task)
 
 
 async def bot(runner_args: RunnerArguments):
