@@ -27,11 +27,13 @@ import sys
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
+from pathlib import Path
 from typing import Dict, Optional
 
 from dotenv import load_dotenv
 from loguru import logger
 
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
@@ -59,6 +61,8 @@ from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+
+from db_tools import DatabaseTools
 
 load_dotenv(override=True)
 
@@ -136,10 +140,16 @@ async def run_bot(transport: BaseTransport):
         aggregate_sentences=False,
     )
 
+    system_prompt = (
+        "You are a helpful e-commerce voice assistant. Respond naturally, conversationally, politely. Your responses should be concise and to the point, yet professional and informative."
+        "Greet the with 'Hi, I'm June, am I speaking to Sarah?' Whether they say yes or no, ask for their email address."
+        "You have access to database tools that can look up orders and products. Use these tools only when the user explicitly asks about an order or a product, and request identifying details first when needed. If the user asks about their orders, please ask them to give their email address or customer ID, if they haven't shared it already.For unrelated questions, answer without using the tools and gently guide the user back to shopping topics when appropriate."
+    )
+
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful voice assistant. Respond naturally and conversationally to user queries.",
+            "content": system_prompt,
         }
     ]
 
@@ -150,8 +160,20 @@ async def run_bot(transport: BaseTransport):
     llm = GoogleLLMService(
         api_key=os.getenv("GOOGLE_API_KEY"),
         model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash-latest"),
-        system_instruction="You are a helpful voice assistant. Respond naturally and conversationally to user queries."
+        system_instruction=system_prompt,
     )
+
+    data_dir = Path(__file__).parent / "data"
+    db_path_env = os.getenv("ORDERS_DB_PATH")
+    db_path = Path(db_path_env) if db_path_env else Path(__file__).parent / "orders.db"
+
+    db_tools = DatabaseTools(db_path=db_path, data_dir=data_dir)
+    tool_functions = list(db_tools.tool_functions)
+    for tool in tool_functions:
+        llm.register_direct_function(tool)
+
+    context.set_tools(ToolsSchema(standard_tools=tool_functions))
+    context.set_tool_choice({"type": "auto"})
 
     rtvi = RTVIProcessor()
     timing_observer = TimingObserver()
