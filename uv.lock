@@ -167,6 +167,18 @@ wheels = [
 ]
 
 [[package]]
+name = "aiohttp-retry"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/61/ebda4d8e3d8cfa1fd3db0fb428db2dd7461d5742cea35178277ad180b033/aiohttp_retry-2.9.1.tar.gz", hash = "sha256:8eb75e904ed4ee5c2ec242fefe85bf04240f685391c4879d8f541d6028ff01f1", size = 13608, upload-time = "2024-11-06T10:44:54.574Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/99/84ba7273339d0f3dfa57901b846489d2e5c2cd731470167757f1935fffbd/aiohttp_retry-2.9.1-py3-none-any.whl", hash = "sha256:66d2759d1921838256a05a3f80ad7e724936f083e35be5abb5e16eed6be6dc54", size = 9981, upload-time = "2024-11-06T10:44:52.917Z" },
+]
+
+[[package]]
 name = "aioice"
 version = "0.10.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2607,6 +2619,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyjwt"
+version = "2.10.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e7/46/bd74733ff231675599650d3e47f361794b22ef3e3770998dda30d3b63726/pyjwt-2.10.1.tar.gz", hash = "sha256:3cc5772eb20009233caf06e9d8a0577824723b44e6648ee0a2aedb6cf9381953", size = 87785, upload-time = "2024-11-28T03:43:29.933Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/61/ad/689f02752eeec26aed679477e80e632ef1b682313be70793d798c1d5fc8f/PyJWT-2.10.1-py3-none-any.whl", hash = "sha256:dcdd193e30abefd5debf142f9adfcdd2b58004e644f25406ffaebd50bd98dacb", size = 22997, upload-time = "2024-11-28T03:43:27.893Z" },
+]
+
+[[package]]
 name = "pylibsrtp"
 version = "1.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3408,6 +3429,21 @@ wheels = [
 ]
 
 [[package]]
+name = "twilio"
+version = "9.8.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "aiohttp-retry" },
+    { name = "pyjwt" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/00/ab/e8593cd07d1cd3cf76566a32a3bd0515f73ba6cb791dba669d1b989c75bf/twilio-9.8.5.tar.gz", hash = "sha256:b69dc2226294ef579fcdd92b502aef7982a60577110a0799f8c2b739428e1dcf", size = 942213, upload-time = "2025-10-28T10:06:58.114Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/6c/b7d23e45bcfc0d717343b2a1e5478a529a6b8bb4d1a18a2184ab4c1aa014/twilio-9.8.5-py2.py3-none-any.whl", hash = "sha256:7e1d04bb2cd480a97937f1fbea5fe35377925b6f70745baade08bde9cd4fb319", size = 1834872, upload-time = "2025-10-28T10:06:56.406Z" },
+]
+
+[[package]]
 name = "typer"
 version = "0.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3622,6 +3658,8 @@ dependencies = [
     { name = "aiohttp-cors" },
     { name = "aiosqlite" },
     { name = "pipecat-ai", extra = ["deepgram", "elevenlabs", "google", "local-smart-turn-v3", "runner", "silero", "webrtc"] },
+    { name = "python-dotenv" },
+    { name = "twilio" },
 ]
 
 [package.dev-dependencies]
@@ -3635,6 +3673,8 @@ requires-dist = [
     { name = "aiohttp-cors" },
     { name = "aiosqlite", specifier = ">=0.20.0,<1" },
     { name = "pipecat-ai", extras = ["deepgram", "elevenlabs", "google", "local-smart-turn-v3", "runner", "silero", "webrtc"] },
+    { name = "python-dotenv", specifier = ">=1.0.0,<2" },
+    { name = "twilio", specifier = ">=9.0.0,<10" },
 ]
 
 [package.metadata.requires-dev]

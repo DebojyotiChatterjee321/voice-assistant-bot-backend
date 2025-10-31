@@ -57,13 +57,20 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIObserver, RTVIProcessor
-from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
+from pipecat.runner.types import (
+    RunnerArguments,
+    SmallWebRTCRunnerArguments,
+    WebSocketRunnerArguments,
+)
+from pipecat.runner.utils import create_transport
+
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 
 from db_tools import DatabaseTools
 from deepgram.clients.live.v1 import LiveOptions
@@ -113,7 +120,7 @@ class LLMContextPruner(FrameProcessor):
         if "parts" in trimmed and isinstance(trimmed["parts"], list):
             trimmed["parts"] = [self._trim_value(part) for part in trimmed["parts"]]
 
-        return trimmed
+        return message
 
     def _prune_messages(self, messages: List) -> List:
         if not messages:
@@ -442,6 +449,19 @@ async def bot(runner_args: RunnerArguments):
 
     transport = None
 
+    def _build_vad_analyzer() -> SileroVADAnalyzer:
+        return SileroVADAnalyzer(
+            params=VADParams(
+                confidence=0.75,
+                start_secs=0.12,
+                stop_secs=0.3,
+                min_volume=0.55,
+            )
+        )
+
+    def _build_turn_analyzer() -> LocalSmartTurnAnalyzerV3:
+        return LocalSmartTurnAnalyzerV3()
+
     match runner_args:
         case SmallWebRTCRunnerArguments():
             webrtc_connection: SmallWebRTCConnection = runner_args.webrtc_connection
@@ -451,17 +471,25 @@ async def bot(runner_args: RunnerArguments):
                 params=TransportParams(
                     audio_in_enabled=True,
                     audio_out_enabled=True,
-                    vad_analyzer=SileroVADAnalyzer(
-                        params=VADParams(
-                            confidence=0.75,
-                            start_secs=0.12,
-                            stop_secs=0.3,
-                            min_volume=0.55,
-                        )
-                    ),
-                    turn_analyzer=LocalSmartTurnAnalyzerV3(),
+                    vad_analyzer=_build_vad_analyzer(),
+                    turn_analyzer=_build_turn_analyzer(),
                 ),
             )
+        case WebSocketRunnerArguments():
+            transport_factories = {
+                "twilio": lambda: FastAPIWebsocketParams(
+                    audio_in_enabled=True,
+                    audio_out_enabled=True,
+                    vad_analyzer=_build_vad_analyzer(),
+                    turn_analyzer=_build_turn_analyzer(),
+                )
+            }
+
+            try:
+                transport = await create_transport(runner_args, transport_factories)
+            except Exception as exc:
+                logger.error("Failed to initialize Twilio transport: %s", exc)
+                return
         case _:
             logger.error(f"Unsupported runner arguments type: {type(runner_args)}")
             return
