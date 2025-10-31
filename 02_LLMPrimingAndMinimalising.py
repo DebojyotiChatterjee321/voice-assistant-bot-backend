@@ -66,7 +66,6 @@ from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 from db_tools import DatabaseTools
-from deepgram.clients.live.v1 import LiveOptions
 
 load_dotenv(override=True)
 
@@ -80,7 +79,7 @@ class TurnTiming:
 class LLMContextPruner(FrameProcessor):
     """Trim LLM context history to reduce prompt size before inference."""
 
-    def __init__(self, *, max_turns: int = 10, max_chars: int = 1500) -> None:
+    def __init__(self, *, max_turns: int = 5, max_chars: int = 1000) -> None:
         super().__init__(name="LLMContextPruner", enable_direct_mode=True)
         self._max_turns = max(0, max_turns)
         self._max_chars = max(0, max_chars)
@@ -286,16 +285,6 @@ async def run_bot(transport: BaseTransport):
     # Speech-to-Text service (streaming)
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
-        live_options=LiveOptions(
-            encoding="linear16",
-            language="en",
-            model="nova-3-general",
-            channels=1,
-            interim_results=True,
-            smart_format=True,
-            punctuate=True,
-            vad_events=True,
-        ),
     )
 
     # Text-to-Speech service
@@ -373,25 +362,6 @@ async def run_bot(transport: BaseTransport):
     warm_lock = asyncio.Lock()
     warm_done = False
 
-    async def warm_tts_connection() -> None:
-        logger.info("Priming TTS connection")
-        try:
-            async for frame in tts.run_tts(" "):
-                if frame is None:
-                    break
-        except Exception as exc:  # pragma: no cover - warmup best-effort
-            logger.warning("TTS warmup failed: %s", exc)
-        else:
-            try:
-                await tts.flush_audio()
-            except Exception as exc:  # pragma: no cover - warmup best-effort
-                logger.debug("TTS flush after warmup failed: %s", exc)
-        finally:
-            if hasattr(tts, "_started"):
-                tts._started = False
-            if hasattr(tts, "_context_id"):
-                tts._context_id = None
-
     async def ensure_warm_paths():
         nonlocal warm_done
         if warm_done:
@@ -414,11 +384,6 @@ async def run_bot(transport: BaseTransport):
                 await llm.run_inference(warm_context)
             except Exception as exc:  # pragma: no cover - warmup best-effort
                 logger.warning("LLM warmup failed: %s", exc)
-
-            try:
-                await warm_tts_connection()
-            except Exception as exc:  # pragma: no cover - warmup best-effort
-                logger.warning("TTS warmup attempt failed: %s", exc)
 
             warm_done = True
 
@@ -451,14 +416,7 @@ async def bot(runner_args: RunnerArguments):
                 params=TransportParams(
                     audio_in_enabled=True,
                     audio_out_enabled=True,
-                    vad_analyzer=SileroVADAnalyzer(
-                        params=VADParams(
-                            confidence=0.75,
-                            start_secs=0.12,
-                            stop_secs=0.3,
-                            min_volume=0.55,
-                        )
-                    ),
+                    vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
                     turn_analyzer=LocalSmartTurnAnalyzerV3(),
                 ),
             )

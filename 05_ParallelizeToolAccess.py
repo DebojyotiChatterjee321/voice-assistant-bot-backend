@@ -21,6 +21,7 @@ Run the bot using::
 """
 
 import asyncio
+import functools
 import os
 import re
 import sys
@@ -61,6 +62,7 @@ from pipecat.runner.types import RunnerArguments, SmallWebRTCRunnerArguments
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
@@ -80,7 +82,7 @@ class TurnTiming:
 class LLMContextPruner(FrameProcessor):
     """Trim LLM context history to reduce prompt size before inference."""
 
-    def __init__(self, *, max_turns: int = 10, max_chars: int = 1500) -> None:
+    def __init__(self, *, max_turns: int = 5, max_chars: int = 1000) -> None:
         super().__init__(name="LLMContextPruner", enable_direct_mode=True)
         self._max_turns = max(0, max_turns)
         self._max_chars = max(0, max_chars)
@@ -327,6 +329,7 @@ async def run_bot(transport: BaseTransport):
         api_key=os.getenv("GOOGLE_API_KEY"),
         model=os.getenv("GOOGLE_MODEL", "gemini-1.5-flash-latest"),
         system_instruction=system_prompt,
+        run_in_parallel=True,
     )
 
     data_dir = Path(__file__).parent / "data"
@@ -334,11 +337,34 @@ async def run_bot(transport: BaseTransport):
     db_path = Path(db_path_env) if db_path_env else Path(__file__).parent / "orders.db"
 
     db_tools = DatabaseTools(db_path=db_path, data_dir=data_dir)
-    tool_functions = list(db_tools.tool_functions)
-    for tool in tool_functions:
-        llm.register_direct_function(tool)
+    original_tools = list(db_tools.tool_functions)
 
-    context.set_tools(ToolsSchema(standard_tools=tool_functions))
+    def _wrap_tool(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                params = args[0] if args else kwargs.get("params")
+                logger.exception("Tool %s failed: %s", getattr(params, "function_name", func.__name__), exc)
+                if isinstance(params, FunctionCallParams):
+                    await params.result_callback(
+                        {
+                            "status": "error",
+                            "message": "Tool execution failed. Please try again.",
+                        }
+                    )
+                return None
+
+        return wrapper
+
+    wrapped_tools = []
+    for tool in original_tools:
+        wrapped = _wrap_tool(tool)
+        wrapped_tools.append(wrapped)
+        llm.register_direct_function(wrapped)
+
+    context.set_tools(ToolsSchema(standard_tools=wrapped_tools))
     context.set_tool_choice({"type": "auto"})
 
     rtvi = RTVIProcessor()

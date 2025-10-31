@@ -29,7 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 from types import MethodType
 
 from dotenv import load_dotenv
@@ -42,7 +42,6 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
-    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMRunFrame,
@@ -66,7 +65,6 @@ from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 from db_tools import DatabaseTools
-from deepgram.clients.live.v1 import LiveOptions
 
 load_dotenv(override=True)
 
@@ -75,78 +73,6 @@ class TurnTiming:
     stt_ms: float = 0.0
     dialogue_ms: float = 0.0
     tts_ms: float = 0.0
-
-
-class LLMContextPruner(FrameProcessor):
-    """Trim LLM context history to reduce prompt size before inference."""
-
-    def __init__(self, *, max_turns: int = 10, max_chars: int = 1500) -> None:
-        super().__init__(name="LLMContextPruner", enable_direct_mode=True)
-        self._max_turns = max(0, max_turns)
-        self._max_chars = max(0, max_chars)
-        self._max_messages = self._max_turns * 2 if self._max_turns else 0
-
-    def _trim_text(self, value: str) -> str:
-        if not self._max_chars or len(value) <= self._max_chars:
-            return value
-        return f"{value[: self._max_chars].rstrip()} …"
-
-    def _trim_value(self, value: Any) -> Any:
-        if isinstance(value, str):
-            return self._trim_text(value)
-        if isinstance(value, list):
-            return [self._trim_value(item) for item in value]
-        if isinstance(value, dict):
-            return {key: self._trim_value(val) for key, val in value.items()}
-        return value
-
-    def _trim_message(self, message: dict) -> dict:
-        trimmed = {**message}
-
-        if "content" in trimmed:
-            content = trimmed["content"]
-            if isinstance(content, str):
-                trimmed["content"] = self._trim_text(content)
-            elif isinstance(content, list):
-                trimmed["content"] = [self._trim_value(part) for part in content]
-
-        if "parts" in trimmed and isinstance(trimmed["parts"], list):
-            trimmed["parts"] = [self._trim_value(part) for part in trimmed["parts"]]
-
-        return trimmed
-
-    def _prune_messages(self, messages: List) -> List:
-        if not messages:
-            return messages
-
-        system_messages: List = []
-        rest = messages
-
-        first = messages[0]
-        if isinstance(first, dict) and first.get("role") == "system":
-            system_messages = [first]
-            rest = messages[1:]
-
-        if self._max_messages and len(rest) > self._max_messages:
-            drop = len(rest) - self._max_messages
-            logger.debug("Pruning %s older LLM messages", drop)
-            rest = rest[-self._max_messages :]
-
-        trimmed_rest = [self._trim_message(msg) if isinstance(msg, dict) else msg for msg in rest]
-        return system_messages + trimmed_rest
-
-    async def process_frame(self, frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-
-        if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
-            context = frame.context
-            if context:
-                messages = context.get_messages()
-                pruned = self._prune_messages(messages)
-                if pruned is not messages:
-                    context.set_messages(pruned)
-
-        await self.push_frame(frame, direction)
 
 
 class TimingObserver(FrameProcessor):
@@ -286,16 +212,6 @@ async def run_bot(transport: BaseTransport):
     # Speech-to-Text service (streaming)
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
-        live_options=LiveOptions(
-            encoding="linear16",
-            language="en",
-            model="nova-3-general",
-            channels=1,
-            interim_results=True,
-            smart_format=True,
-            punctuate=True,
-            vad_events=True,
-        ),
     )
 
     # Text-to-Speech service
@@ -320,7 +236,6 @@ async def run_bot(transport: BaseTransport):
 
     context = LLMContext(messages)
     context_aggregator = LLMContextAggregatorPair(context)
-    context_pruner = LLMContextPruner(max_turns=3, max_chars=600)
 
     # LLM service
     llm = GoogleLLMService(
@@ -350,7 +265,6 @@ async def run_bot(transport: BaseTransport):
         rtvi,
         stt,
         context_aggregator.user(),
-        context_pruner,
         llm,
         tts,
         transport.output(),
@@ -370,62 +284,9 @@ async def run_bot(transport: BaseTransport):
         ],
     )
 
-    warm_lock = asyncio.Lock()
-    warm_done = False
-
-    async def warm_tts_connection() -> None:
-        logger.info("Priming TTS connection")
-        try:
-            async for frame in tts.run_tts(" "):
-                if frame is None:
-                    break
-        except Exception as exc:  # pragma: no cover - warmup best-effort
-            logger.warning("TTS warmup failed: %s", exc)
-        else:
-            try:
-                await tts.flush_audio()
-            except Exception as exc:  # pragma: no cover - warmup best-effort
-                logger.debug("TTS flush after warmup failed: %s", exc)
-        finally:
-            if hasattr(tts, "_started"):
-                tts._started = False
-            if hasattr(tts, "_context_id"):
-                tts._context_id = None
-
-    async def ensure_warm_paths():
-        nonlocal warm_done
-        if warm_done:
-            return
-
-        async with warm_lock:
-            if warm_done:
-                return
-
-            logger.info("Priming LLM cache")
-
-            warm_context = LLMContext(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": "Warm-up ping"},
-                ]
-            )
-
-            try:
-                await llm.run_inference(warm_context)
-            except Exception as exc:  # pragma: no cover - warmup best-effort
-                logger.warning("LLM warmup failed: %s", exc)
-
-            try:
-                await warm_tts_connection()
-            except Exception as exc:  # pragma: no cover - warmup best-effort
-                logger.warning("TTS warmup attempt failed: %s", exc)
-
-            warm_done = True
-
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
         logger.info("Client connected")
-        await ensure_warm_paths()
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")
@@ -451,14 +312,7 @@ async def bot(runner_args: RunnerArguments):
                 params=TransportParams(
                     audio_in_enabled=True,
                     audio_out_enabled=True,
-                    vad_analyzer=SileroVADAnalyzer(
-                        params=VADParams(
-                            confidence=0.75,
-                            start_secs=0.12,
-                            stop_secs=0.3,
-                            min_volume=0.55,
-                        )
-                    ),
+                    vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.2)),
                     turn_analyzer=LocalSmartTurnAnalyzerV3(),
                 ),
             )
